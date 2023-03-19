@@ -1,0 +1,175 @@
+---
+title: "Fashion Item Identification using PCA & SVM"
+date: "2023-02-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Loading any packages 
+
+```{r}
+library(readr)
+library(caret)
+```
+
+Load the training and testing data.
+
+```{r}
+train <- read_csv("EDA/archive/fashion-mnist_train.csv")
+test <- read_csv("EDA/archive/fashion-mnist_test.csv")
+label.names <- c("T-shirt/top",
+                 "Trouser",
+                 "Pullover",
+                 "Dress",
+                 "Coat",
+                 "Sandal",
+                 "Shirt",
+                 "Sneaker",
+                 "Bag",
+                 "Ankle boot") 
+```
+
+Let's have a look at the structure of the data.
+```{r}
+head(train)
+```
+
+```{r structure}
+dimMtrx <- rbind(dim(train), dim(test))
+rownames(dimMtrx) <- c("Train", "Test")
+colnames(dimMtrx) <- c("Rows", "Cols")
+print(dimMtrx)
+
+label.factor <- as.factor(train$label)
+levels(label.factor) <- label.names
+table(label.factor)
+```
+
+As we can see, each dataset has 785 columns, 1 of which is the label attriubute and the other 784 areors representing the pixel values of the image. The train dataset has 60000 observations and the test dataset has 10000. Lastly we can see that there is an equal number of each clothing item in the training dataset.
+
+
+```{r}
+sample <- sapply(0:9, function(x) sample(which(train$label == x), 10))
+pxlVals <- t(train[c(sample), -1])
+pxlVals.mtrx <- lapply(1:100, function(x) matrix(pxlVals[,x], ncol = 28))
+par(mfrow = c(10,10), mar = rep(.1, 4))
+                       
+for(i in 1:100){
+    for(j in 1:28) {
+    pxlVals.mtrx[[i]][j,] <- rev(pxlVals.mtrx[[i]][j,])
+  }
+    image(pxlVals.mtrx[[i]],col=grey.colors(225),axes=F)
+}
+```
+
+### Data Preproccessing
+
+Since running the SVM algorithm on the whole 60,000 observations in the training dataset whilst having the necessary number of rounds of cross-validation will take too long to complete in Kaggle's one hour kernal time limit, we will combine the current training and testing data sets into one and then split them into what is closer to the standard 2:1 ratio compared to the current 6:1.
+
+```{r}
+combi <- rbind(train, test)
+train <- combi[1:45000,]
+test <- combi[45001:70000,]
+```
+
+Since our dataset is likely to contain someors that don't tell us much about which item of clothing the image is of (i.e. the corners) it is important to remove anyors that either have a unique value or have a near zero variance.
+
+```{r}
+nzrv <- nearZeroVar(train[,-1], saveMetrics = T, freqCut = 300, uniqueCut = 1/4)
+discard <- rownames(nzrv[nzrv$nzv,])
+keep <- setdiff(names(train), discard)
+train <- train[,keep]
+
+cat(sum(nzrv$nzv), "near zero varianceors have been removed,", "\n") 
+cat(sum(nzrv$zeroVar), "of which were zero varianceors.")
+```
+
+### PCA on Data
+
+Since we have to manyors, we will need to use PCA on the training dataset. We will begin by scaling the data so the values lie between 0 and 1, and then we can obtain a covariance matrix of theors.
+
+```{r}
+label <- as.factor(train$label)
+train$label <- NULL
+train <- train / 255
+train.cov <- cov(train)
+```
+
+We are now ready to apply PCA to the covariance matrix and then plot a graph to show how the number of components affect the varience explained so we can choose how many components to model.
+
+```{r}
+train.pc <- prcomp(train.cov)
+var.ex <- train.pc$sdev^2 / sum(train.pc$sdev^2)
+var.cum <- cumsum(var.ex)
+
+results <- data.frame(num <- 1:length(train.pc$sdev),
+                     ex = var.ex,
+                     cum = var.cum)
+
+plot(results$num, results$cum, type = "b", xlim = c(0,40),
+     main = "Variance Explained by Top 40 Components",
+     xlab = "Number of Components", ylab = "Variance Explained")
+```
+
+From the plot, we can see that 20 components would be a good choice. We can now plot the first two principal components.
+
+```{r}
+train.score <- as.matrix(train) %*% train.pc$rotation[,1:20]
+train <- cbind(label, as.data.frame(train.score))
+
+colours <- rainbow(length(unique(train$label)))
+names(colours) <- unique(train$label)
+plot(train$PC1, train$PC2, type = "p", main = "First Two Principal Components",
+     col = colours[train$label], cex = 0.1, xlab = "1st Principle Component",
+     ylab = "2nd Principle Components")
+```
+
+
+### Train and
+
+Using the SVM classification algorthm for this, in particular the Radial Basis Function kernel. After creating the model we can proces our testing data as we did the training data and the use our model to the item of clothing that each image is of.
+
+```{r}
+svm_mdl <- train(label~.,data=train,
+                 method="svmRadial",
+                 trControl=trainControl(method="cv", number=3),
+                 tuneGrid=data.frame(sigma = 0.01, C = 3.5))
+print(svm_mdl)
+```
+
+```{r}
+test.labels <- test$label
+test <- test[,keep[-1]]/255
+test <- as.matrix(test) %*% train.pc$rotation[,1:20]
+test <- as.data.frame(test)
+```
+
+```{r predict}
+pred <- predict(svm_mdl, test)
+test$prediction <- pred
+```
+
+### Evaluation
+
+We can now evaluate the quality of our model and find its shortcomings. First we will print a table to see how the modelions and the actual labels compare and then use this to find our model accuracy.
+
+```{r}
+tbl <- table(Label = test.labels,ion = test$prediction)
+print(tbl)
+cat("The model is ", 100 * sum(diag(tbl)) / nrow(test), "% accurate.", sep = "")
+```
+
+Not bad at all! It seems that our most inaccurate ion comes from the seventh row, first column. This corresponds to guessing that an item that was actually a coat was a T-shirt or top which is an understandable mistake.
+
+
+```{r}
+accuracy <- diag(tbl) / rowSums(tbl)
+names(accuracy) <- label.names
+accuracy <- sort(accuracy, decreasing = T)
+print(accuracy)
+```
+
+As expected the model was best at identifying items with a unique shape such as bags, trousers and ankle boots but it was rather poor at identifying objects with generic shape such as shirts, pullovers and coats.
